@@ -21,7 +21,7 @@
 #include "esp_idf_version.h"
 #include <unistd.h>
 
-// #define SERIAL_DEBUG_ENABLE
+//#define SERIAL_DEBUG_ENABLE
 
 #ifdef SERIAL_DEBUG_ENABLE
 
@@ -105,7 +105,6 @@ esp_loader_error_t loader_port_esp32_init(const loader_esp32_config_t *config)
     gpio_reset_pin(s_gpio0_trigger_pin);
     gpio_set_pull_mode(s_gpio0_trigger_pin, GPIO_PULLUP_ONLY);
     gpio_set_direction(s_gpio0_trigger_pin, GPIO_MODE_OUTPUT);
-
     return ESP_LOADER_SUCCESS;
 }
 
@@ -114,23 +113,38 @@ void loader_port_esp32_deinit(void)
     uart_driver_delete(s_uart_port);
 }
 
-
+static uint8_t s_loader_data_cache[2100];
+static uint16_t s_loader_data_count = 0;
 esp_loader_error_t loader_port_serial_write(const uint8_t *data, uint16_t size, uint32_t timeout)
 {
+    esp_err_t err = ESP_OK;
     serial_debug_print(data, size, true);
 
-    uart_write_bytes(s_uart_port, (const char *)data, size);
-    esp_err_t err = uart_wait_tx_done(s_uart_port, pdMS_TO_TICKS(timeout));
+    if(s_loader_data_count == 0 && data[0] != 0xc0) {
+        uart_write_bytes(s_uart_port, (const char *) data, size);
+        err = uart_wait_tx_done(s_uart_port, 50 /*pdMS_TO_TICKS(timeout)*/);
+    } else {
+        for(uint16_t i = 0; i< size; i++)
+        {
+            s_loader_data_cache[s_loader_data_count + i] = data[i];
+        }
+        s_loader_data_count += size;
+        if((size == 1) && (data[0] == 0xc0) && s_loader_data_count > 1)
+        {
+            uart_write_bytes(s_uart_port, (const char *) s_loader_data_cache, s_loader_data_count);
+            err = uart_wait_tx_done(s_uart_port, 50 /*pdMS_TO_TICKS(timeout)*/);
+            s_loader_data_count = 0;
+        }
+    }
 
-    if (err == ESP_OK) {
+    if (err == ESP_OK || err == ESP_ERR_TIMEOUT) {
         return ESP_LOADER_SUCCESS;
-    } else if (err == ESP_ERR_TIMEOUT) {
-        return ESP_LOADER_ERROR_TIMEOUT;
+//    } else if (err == ESP_ERR_TIMEOUT) {
+//        return ESP_LOADER_ERROR_TIMEOUT;
     } else {
         return ESP_LOADER_ERROR_FAIL;
     }
 }
-
 
 esp_loader_error_t loader_port_serial_read(uint8_t *data, uint16_t size, uint32_t timeout)
 {
