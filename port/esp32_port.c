@@ -99,19 +99,40 @@ void loader_port_esp32_deinit(void)
     }
 }
 
-
+static uint8_t s_loader_data_cache[2100];
+static uint16_t s_loader_data_count = 0;
 esp_loader_error_t loader_port_write(const uint8_t *data, uint16_t size, uint32_t timeout)
 {
-    uart_write_bytes(s_uart_port, (const char *)data, size);
-    esp_err_t err = uart_wait_tx_done(s_uart_port, pdMS_TO_TICKS(timeout));
+    esp_err_t err = ESP_OK;
 
-    if (err == ESP_OK) {
+    if((s_loader_data_count == 0) && (data[0] != 0xc0)) {
+        uart_write_bytes(s_uart_port, (const char *) data, size);
+        err = uart_wait_tx_done(s_uart_port, 50 /*pdMS_TO_TICKS(timeout)*/);
+
 #if SERIAL_FLASHER_DEBUG_TRACE
         transfer_debug_print(data, size, true);
 #endif
+
+    } else {
+
+        for(uint16_t i = 0; i< size; i++)
+        {
+            s_loader_data_cache[s_loader_data_count + i] = data[i];
+        }
+
+        s_loader_data_count += size;
+        if((size == 1) && (data[0] == 0xc0) && (s_loader_data_count > 1))
+        {
+            uart_write_bytes(s_uart_port, (const char *) s_loader_data_cache, s_loader_data_count);
+            err = uart_wait_tx_done(s_uart_port, 50 /*pdMS_TO_TICKS(timeout)*/);
+            s_loader_data_count = 0;
+        }
+    }
+
+    if (err == ESP_OK || err == ESP_ERR_TIMEOUT) {
         return ESP_LOADER_SUCCESS;
-    } else if (err == ESP_ERR_TIMEOUT) {
-        return ESP_LOADER_ERROR_TIMEOUT;
+//    } else if (err == ESP_ERR_TIMEOUT) {
+//        return ESP_LOADER_ERROR_TIMEOUT;
     } else {
         return ESP_LOADER_ERROR_FAIL;
     }
