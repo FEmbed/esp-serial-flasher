@@ -1,4 +1,4 @@
-/* Copyright 2020 Espressif Systems (Shanghai) PTE LTD
+/* Copyright 2020-2023 Espressif Systems (Shanghai) CO LTD
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,9 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Used for backwards compatibility with the previous API */
+#define esp_loader_change_baudrate esp_loader_change_transmission_rate
 
 /**
  * Macro which can be used to check the error code,
@@ -59,25 +62,47 @@ typedef enum {
     ESP32C3_CHIP = 3,
     ESP32S3_CHIP = 4,
     ESP32C2_CHIP = 5,
-    ESP32H2_CHIP = 6,
-    ESP_MAX_CHIP = 7,
-    ESP_UNKNOWN_CHIP = 7
+    ESP32_RESERVED0_CHIP = 6, // Reserved for future use
+    ESP32H2_CHIP = 7,
+    ESP32C6_CHIP = 8,
+    ESP_MAX_CHIP = 9,
+    ESP_UNKNOWN_CHIP = 9
 } target_chip_t;
 
 /**
- * @brief SPI pin configuration arguments
+ * @brief Application binary header
  */
-typedef union {
-    struct {
-        uint32_t pin_clk: 6;
-        uint32_t pin_q:   6;
-        uint32_t pin_d:   6;
-        uint32_t pin_cs:  6;
-        uint32_t pin_hd:  6;
-        uint32_t zero:    2;
-    };
-    uint32_t val;
-} esp_loader_spi_config_t;
+typedef struct {
+    uint8_t magic;
+    uint8_t segments;
+    uint8_t flash_mode;
+    uint8_t flash_size_freq;
+    uint32_t entrypoint;
+} esp_loader_bin_header_t;
+
+/**
+ * @brief Segment binary header
+ */
+typedef struct {
+    uint32_t addr;
+    uint32_t size;
+    uint8_t *data;
+} esp_loader_bin_segment_t;
+
+typedef struct {
+    target_chip_t target_chip;
+    uint32_t eco_version; // Not present on ESP32-S2
+    bool secure_boot_enabled;
+    bool secure_boot_aggressive_revoke_enabled;
+    bool secure_download_mode_enabled;
+    bool secure_boot_revoked_keys[3];
+    bool jtag_software_disabled;
+    bool jtag_hardware_disabled;
+    bool usb_disabled;
+    bool flash_encryption_enabled;
+    bool dcache_in_uart_download_disabled;
+    bool icache_in_uart_download_disabled;
+} esp_loader_target_security_info_t;
 
 /**
  * @brief Connection arguments
@@ -108,19 +133,57 @@ esp_loader_error_t esp_loader_connect(esp_loader_connect_args_t *connect_args);
 /**
   * @brief   Returns attached target chip.
   *
-  * @warning This function can only be called after connection with target 
+  * @warning This function can only be called after connection with target
   *          has been successfully established by calling esp_loader_connect().
   *
   * @return  One of target_chip_t
   */
 target_chip_t esp_loader_get_target(void);
 
+
+#if (defined SERIAL_FLASHER_INTERFACE_UART) || (defined SERIAL_FLASHER_INTERFACE_USB)
+/**
+  * @brief Connects to the target while using the flasher stub
+  *
+  * @param connect_args[in] Timing parameters to be used for connecting to target.
+  *
+  * @return
+  *     - ESP_LOADER_SUCCESS Success
+  *     - ESP_LOADER_ERROR_TIMEOUT Timeout
+  *     - ESP_LOADER_ERROR_INVALID_RESPONSE Internal error
+  */
+esp_loader_error_t esp_loader_connect_with_stub(esp_loader_connect_args_t *connect_args);
+
+#ifdef SERIAL_FLASHER_INTERFACE_UART
+/**
+  * @brief Connects to the target running in secure download mode
+  *
+  * Secure download mode is a special mode in which the commands accepted by the boot ROM
+  * are limited to a safe subset. It is enabled by burning an efuse on the target.
+  * Read more about it here:
+  * https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/kconfig.html#config-secure-uart-rom-dl-mode
+  *
+  * @param connect_args[in] Timing parameters to be used for connecting to target.
+  * @param flash_size Flash size of the target chip.
+  * @param target_chip Target chip. Used for the ESP32 and ESP8266, which do not support the
+  *                    GET_SECURITY_INFO command required to identify the target in secure
+  *                    download mode. Leave as ESP_UNKNOWN_CHIP for autodetection of newer chips.
+  *
+  * @return
+  *     - ESP_LOADER_SUCCESS Success
+  *     - ESP_LOADER_ERROR_TIMEOUT Timeout
+  *     - ESP_LOADER_ERROR_INVALID_RESPONSE Internal error
+  */
+esp_loader_error_t esp_loader_connect_secure_download_mode(esp_loader_connect_args_t *connect_args,
+        uint32_t flash_size, target_chip_t target_chip);
+#endif /* SERIAL_FLASHER_INTERFACE_UART */
+
 /**
   * @brief Initiates flash operation
   *
-  * @param offset[in]       Address from which flash operation will be performed.
-  * @param image_size[in]   Size of the whole binary to be loaded into flash.
-  * @param block_size[in]   Size of buffer used in subsequent calls to esp_loader_flash_write.
+  * @param offset[in] Address from which flash operation will be performed. Must be 4 byte aligned.
+  * @param image_size[in] Size of the whole binary to be loaded into flash. Must be 4 byte aligned.
+  * @param block_size[in] Size of buffer used in subsequent calls to esp_loader_flash_write.
   *
   * @note  image_size is size of the whole image, whereas, block_size is chunk of data sent
   *        to the target, each time esp_loader_flash_write function is called.
@@ -163,6 +226,136 @@ esp_loader_error_t esp_loader_flash_write(void *payload, uint32_t size);
 esp_loader_error_t esp_loader_flash_finish(bool reboot);
 
 /**
+  * @brief Detects the size of the flash chip used by target
+  *
+  * @param flash_size[out] Flash size detected in bytes
+  *
+  * @return
+  *     - ESP_LOADER_SUCCESS Success
+  *     - ESP_LOADER_ERROR_UNSUPPORTED_CHIP The target flash chip is not known
+  *     - ESP_LOADER_ERROR_UNSUPPORTED_FUNC The target chip is running in secure download mode
+  */
+esp_loader_error_t esp_loader_flash_detect_size(uint32_t *flash_size);
+
+/**
+  * @brief Reads from the target flash.
+  *
+  * @param buf[out] Buffer to read into
+  * @param address[in] Flash address to read from.
+  * @param length[in] Read length in bytes.
+  *
+  * @note Higher read speeds can be achieved by using the flasher stub.
+  *
+  * @return
+  *     - ESP_LOADER_SUCCESS Success
+  *     - ESP_LOADER_ERROR_UNSUPPORTED_CHIP The target flash chip is not known
+  *     - ESP_LOADER_ERROR_UNSUPPORTED_FUNC The target chip is running in secure download mode
+  */
+esp_loader_error_t esp_loader_flash_read(uint8_t *buf, uint32_t address, uint32_t length);
+
+/**
+  * @brief Change baud rate of the stub running on the target
+  *
+  * @note  Baud rate has to be also adjusted accordingly on host MCU, as
+  *        target's baud rate is changed upon return from this function.
+  *
+  * @param old_transmission_rate[in] The baudrate to be changed
+  * @param new_transmission_rate[in] The new baud rate to be set.
+  *
+  * @return
+  *     - ESP_LOADER_SUCCESS Success
+  *     - ESP_LOADER_ERROR_TIMEOUT Timeout
+  *     - ESP_LOADER_ERROR_INVALID_RESPONSE Internal error
+  *     - ESP_LOADER_ERROR_UNSUPPORTED_FUNC The stub is not running
+  */
+esp_loader_error_t esp_loader_change_transmission_rate_stub(uint32_t old_transmission_rate,
+        uint32_t new_transmission_rate);
+
+/**
+  * @brief Get the security info of the target chip
+  *
+  * @note  The ESP32 and ESP8266 do not support this command.
+  *
+  * @param security_info[out] The security info structure
+  *
+  * @return
+  *     - ESP_LOADER_SUCCESS Success
+  *     - ESP_LOADER_ERROR_TIMEOUT Either a timeout event or the target chip responded with
+  *                                a different command code, due to not supporting the command.
+  *     - ESP_LOADER_ERROR_INVALID_RESPONSE The target reply is malformed.
+  *     - ESP_LOADER_ERROR_UNSUPPORTED_FUNC The target chip does not support this command.
+  */
+esp_loader_error_t esp_loader_get_security_info(esp_loader_target_security_info_t *security_info);
+#endif /* SERIAL_FLASHER_INTERFACE_UART || SERIAL_FLASHER_INTERFACE_USB */
+
+
+/**
+  * @brief Initiates mem operation, initiates loading for program into target RAM
+  *
+  * @param offset[in]       Address from which mem operation will be performed.
+  * @param size[in]         Size of the whole binary to be loaded into mem.
+  * @param block_size[in]   Size of buffer used in subsequent calls to esp_loader_mem_write.
+  *
+  * @note  image_size is size of the whole image, whereas, block_size is chunk of data sent
+  *        to the target, each time esp_mem_flash_write function is called.
+  *
+  * @return
+  *     - ESP_LOADER_SUCCESS Success
+  *     - ESP_LOADER_ERROR_TIMEOUT Timeout
+  *     - ESP_LOADER_ERROR_INVALID_RESPONSE Internal error
+  *     - ESP_LOADER_ERROR_UNSUPPORTED_FUNC The target is running in secure download mode
+  */
+esp_loader_error_t esp_loader_mem_start(uint32_t offset, uint32_t size, uint32_t block_size);
+
+
+/**
+  * @brief Writes supplied data to target's mem memory.
+  *
+  * @param payload[in]      Data to be loaded into target's memory.
+  * @param size[in]         Size of data in bytes.
+  *
+  * @note  size must not be greater that block_size supplied to previously called
+  *        esp_loader_mem_start function.
+  *        Therefore, size of data buffer has to be equal or greater than block_size.
+  *
+  * @return
+  *     - ESP_LOADER_SUCCESS Success
+  *     - ESP_LOADER_ERROR_TIMEOUT Timeout
+  *     - ESP_LOADER_ERROR_INVALID_RESPONSE Internal error
+  *     - ESP_LOADER_ERROR_UNSUPPORTED_FUNC The target is running in secure download mode
+  */
+esp_loader_error_t esp_loader_mem_write(const void *payload, uint32_t size);
+
+
+/**
+  * @brief Ends mem operation, finish loading for program into target RAM
+  *        and send the entrypoint of ram_loadable app
+  *
+  * @param entrypoint[in]       entrypoint of ram program.
+  *
+  * @return
+  *     - ESP_LOADER_SUCCESS Success
+  *     - ESP_LOADER_ERROR_TIMEOUT Timeout
+  *     - ESP_LOADER_ERROR_INVALID_RESPONSE Internal error
+  *     - ESP_LOADER_ERROR_UNSUPPORTED_FUNC The target is running in secure download mode
+  */
+esp_loader_error_t esp_loader_mem_finish(uint32_t entrypoint);
+
+
+/**
+  * @brief Reads te MAC of the connected chip.
+  *
+  * @param mac[out] 6 byte MAC address of the chip
+  *
+  * @return
+  *     - ESP_LOADER_SUCCESS Success
+  *     - ESP_LOADER_ERROR_TIMEOUT Timeout
+  *     - ESP_LOADER_ERROR_INVALID_RESPONSE Internal error
+  *     - ESP_LOADER_ERROR_UNSUPPORTED_FUNC The target is running in secure download mode
+  */
+esp_loader_error_t esp_loader_read_mac(uint8_t *mac);
+
+/**
   * @brief Writes register.
   *
   * @param address[in]      Address of register.
@@ -172,6 +365,7 @@ esp_loader_error_t esp_loader_flash_finish(bool reboot);
   *     - ESP_LOADER_SUCCESS Success
   *     - ESP_LOADER_ERROR_TIMEOUT Timeout
   *     - ESP_LOADER_ERROR_INVALID_RESPONSE Internal error
+  *     - ESP_LOADER_ERROR_UNSUPPORTED_FUNC The target is running in secure download mode
   */
 esp_loader_error_t esp_loader_write_register(uint32_t address, uint32_t reg_value);
 
@@ -185,6 +379,7 @@ esp_loader_error_t esp_loader_write_register(uint32_t address, uint32_t reg_valu
   *     - ESP_LOADER_SUCCESS Success
   *     - ESP_LOADER_ERROR_TIMEOUT Timeout
   *     - ESP_LOADER_ERROR_INVALID_RESPONSE Internal error
+  *     - ESP_LOADER_ERROR_UNSUPPORTED_FUNC The target is running in secure download mode
   */
 esp_loader_error_t esp_loader_read_register(uint32_t address, uint32_t *reg_value);
 
@@ -194,15 +389,16 @@ esp_loader_error_t esp_loader_read_register(uint32_t address, uint32_t *reg_valu
   * @note  Baud rate has to be also adjusted accordingly on host MCU, as
   *        target's baud rate is changed upon return from this function.
   *
-  * @param baudrate[in]     new baud rate to be set.
+  * @param transmission_rate[in]     new baud rate to be set.
   *
   * @return
   *     - ESP_LOADER_SUCCESS Success
   *     - ESP_LOADER_ERROR_TIMEOUT Timeout
   *     - ESP_LOADER_ERROR_INVALID_RESPONSE Internal error
-  *     - ESP_LOADER_ERROR_UNSUPPORTED_FUNC Unsupported on the target
+  *     - ESP_LOADER_ERROR_UNSUPPORTED_FUNC Either the target is running in secure download
+  *       mode or the stub is running on the target.
   */
-esp_loader_error_t esp_loader_change_baudrate(uint32_t baudrate);
+esp_loader_error_t esp_loader_change_transmission_rate(uint32_t transmission_rate);
 
 /**
   * @brief Verify target's flash integrity by checking MD5.

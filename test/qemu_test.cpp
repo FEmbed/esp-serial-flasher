@@ -1,4 +1,4 @@
-/* Copyright 2018 Espressif Systems (Shanghai) PTE LTD
+/* Copyright 2018-2024 Espressif Systems (Shanghai) CO LTD
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,9 +14,9 @@
  */
 
 #include "catch.hpp"
-#include "serial_io_mock.h"
+#include "test_port.h"
 #include "esp_loader.h"
-#include "serial_io.h"
+#include "esp_loader_io.h"
 #include <algorithm>
 #include <iostream>
 #include <fstream>
@@ -38,18 +38,18 @@ TEST_CASE( "Can connect " )
 }
 
 
-inline auto file_size_is(ifstream& file)
+inline auto file_size_is(ifstream &file)
 {
     uint32_t file_size;
 
     file.seekg(0, ios::end);
     file_size = file.tellg();
     file.seekg(0);
-    
+
     return file_size;
 }
 
-void flash_application(ifstream& image)
+void flash_application(ifstream &image)
 {
     uint8_t payload[1024];
     int32_t count = 0;
@@ -57,14 +57,15 @@ void flash_application(ifstream& image)
 
     ESP_ERR_CHECK( esp_loader_flash_start(APP_START_ADDRESS, image_size, sizeof(payload)) );
 
-    while(image_size > 0) {
+    while (image_size > 0) {
         size_t to_read = min(image_size, sizeof(payload));
-        
+
         image.read((char *)payload, to_read);
 
         ESP_ERR_CHECK( esp_loader_flash_write(payload, to_read) );
 
-        cout << "packet: " << count++ <<  " written: " << to_read << endl;
+        cout << endl << "--- FLASH DATA PACKET: " << count++
+             <<  " DATA WRITTEN: " << to_read << " ---" << endl;
 
         image_size -= to_read;
     };
@@ -73,13 +74,13 @@ void flash_application(ifstream& image)
     // loader_flash_finish(false);
 }
 
-bool file_compare(ifstream& file_1, ifstream& file_2, size_t file_size)
+bool file_compare(ifstream &file_1, ifstream &file_2, size_t file_size)
 {
     vector<char> file_data_1(file_size);
     vector<char> file_data_2(file_size);
-    
-    file_1.read((char*) &file_data_1[0], file_size);
-    file_2.read((char*) &file_data_2[0], file_size);
+
+    file_1.read((char *) &file_data_1[0], file_size);
+    file_2.read((char *) &file_data_2[0], file_size);
 
     return file_data_1 == file_data_2;
 }
@@ -97,16 +98,16 @@ TEST_CASE( "Can write application to flash" )
     REQUIRE ( qemu_image.is_open() );
 
     flash_application(new_image);
-    
+
     auto new_image_size = file_size_is(new_image);
     qemu_image.seekg(APP_START_ADDRESS);
     new_image.seekg(0);
-    
+
     REQUIRE ( file_compare(new_image, qemu_image, new_image_size) );
 
     ESP_ERR_CHECK ( esp_loader_flash_verify() );
 
-    // NOTE: loader_flash_finish() is not called to prevent reset of target 
+    // NOTE: loader_flash_finish() is not called to prevent reset of target
 }
 
 TEST_CASE( "Can write and read register" )

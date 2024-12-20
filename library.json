@@ -1,0 +1,27 @@
+{
+    "name": "ESPSerialFlasher",
+    "keywords": "esp-serial-flasher",
+    "description": "esp serial flasher",
+    "authors":
+    {
+        "name": "espressif",
+        "email": "espressif",
+        "url": "https://espressif.com/"
+    },
+    "version": "1.7.0",
+    "frameworks": "espidf",
+    "platforms": "espressif32",
+    "build": {
+        "flags": [
+            "-Iinclude",
+            "-Iport",
+            "-Iprivate_include"
+        ],
+        "srcFilter":[
+            "+<*.c>",
+            "+<*.h>"
+        ]
+    },
+    "dependencies": [
+    ]
+}

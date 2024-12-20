@@ -16,7 +16,7 @@
 #include "esp_targets.h"
 #include <stddef.h>
 
-#define MAX_MAGIC_VALUES 2
+#define MAX_MAGIC_VALUES 4
 
 typedef esp_loader_error_t (*read_spi_config_t)(uint32_t efuse_base, uint32_t *spi_config);
 
@@ -24,6 +24,8 @@ typedef struct {
     target_registers_t regs;
     uint32_t efuse_base;
     uint32_t chip_magic_value[MAX_MAGIC_VALUES];
+    uint32_t mac_efuse_offset;
+    uint32_t chip_id;
     read_spi_config_t read_spi_config;
     bool encryption_in_begin_flash_cmd;
 } esp_target_t;
@@ -33,11 +35,16 @@ typedef struct {
 
 #define ESP8266_SPI_REG_BASE 0x60000200
 #define ESP32S2_SPI_REG_BASE 0x3f402000
+#define ESP32H2_SPI_REG_BASE 0x60003000
+#define ESP32C6_SPI_REG_BASE 0x60003000
 #define ESP32xx_SPI_REG_BASE 0x60002000
 #define ESP32_SPI_REG_BASE   0x3ff42000
 
+#define CHIP_ID_NONE 0xFF
+
 static esp_loader_error_t spi_config_esp32(uint32_t efuse_base, uint32_t *spi_config);
 static esp_loader_error_t spi_config_esp32xx(uint32_t efuse_base, uint32_t *spi_config);
+static esp_loader_error_t spi_config_unsupported(uint32_t efuse_base, uint32_t *spi_config);
 
 static const esp_target_t esp_target[ESP_MAX_CHIP] = {
 
@@ -53,8 +60,11 @@ static const esp_target_t esp_target[ESP_MAX_CHIP] = {
             .miso_dlen  = 0,
         },
         .efuse_base = 0,            // Not used
-        .chip_magic_value  = { 0xfff0c101, 0 },
+        .chip_magic_value  = { 0xfff0c101, 0, 0, 0 },
         .read_spi_config = NULL,    // Not used
+        .mac_efuse_offset = 0, // Not used
+        .encryption_in_begin_flash_cmd = false,
+        .chip_id = CHIP_ID_NONE,
     },
 
     // ESP32
@@ -69,8 +79,11 @@ static const esp_target_t esp_target[ESP_MAX_CHIP] = {
             .miso_dlen = ESP32_SPI_REG_BASE + 0x2c,
         },
         .efuse_base = 0x3ff5A000,
-        .chip_magic_value  = { 0x00f01d83, 0 },
+        .chip_magic_value  = { 0x00f01d83, 0, 0, 0 },
         .read_spi_config = spi_config_esp32,
+        .mac_efuse_offset = 0x04,
+        .encryption_in_begin_flash_cmd = false,
+        .chip_id = 0,
     },
 
     // ESP32S2
@@ -85,8 +98,11 @@ static const esp_target_t esp_target[ESP_MAX_CHIP] = {
             .miso_dlen = ESP32S2_SPI_REG_BASE + 0x28,
         },
         .efuse_base = 0x3f41A000,
-        .chip_magic_value  = { 0x000007c6, 0 },
+        .chip_magic_value  = { 0x000007c6, 0, 0, 0},
         .read_spi_config = spi_config_esp32xx,
+        .mac_efuse_offset = 0x44,
+        .encryption_in_begin_flash_cmd = true,
+        .chip_id = 2,
     },
 
     // ESP32C3
@@ -101,8 +117,11 @@ static const esp_target_t esp_target[ESP_MAX_CHIP] = {
             .miso_dlen = ESP32xx_SPI_REG_BASE + 0x28,
         },
         .efuse_base = 0x60008800,
-        .chip_magic_value = { 0x6921506f, 0x1b31506f },
+        .chip_magic_value = { 0x6921506f, 0x1b31506f, 0x4881606F, 0x4361606F },
         .read_spi_config = spi_config_esp32xx,
+        .mac_efuse_offset = 0x44,
+        .encryption_in_begin_flash_cmd = true,
+        .chip_id = 5,
     },
 
     // ESP32S3
@@ -117,8 +136,11 @@ static const esp_target_t esp_target[ESP_MAX_CHIP] = {
             .miso_dlen = ESP32xx_SPI_REG_BASE + 0x28,
         },
         .efuse_base = 0x60007000,
-        .chip_magic_value = { 0x00000009, 0 },
+        .chip_magic_value = { 0x00000009, 0, 0, 0 },
         .read_spi_config = spi_config_esp32xx,
+        .mac_efuse_offset = 0x44,
+        .encryption_in_begin_flash_cmd = true,
+        .chip_id = 9,
     },
 
     // ESP32C2
@@ -133,38 +155,81 @@ static const esp_target_t esp_target[ESP_MAX_CHIP] = {
             .miso_dlen = ESP32xx_SPI_REG_BASE + 0x28,
         },
         .efuse_base = 0x60008800,
-        .chip_magic_value = { 0x6f51306f, 0 },
+        .chip_magic_value = { 0x6f51306f, 0x7c41a06f, 0, 0 },
         .read_spi_config = spi_config_esp32xx,
+        .mac_efuse_offset = 0x40,
+        .encryption_in_begin_flash_cmd = true,
+        .chip_id = 12,
     },
+
+    // Reserved for future use
+    {
+        .chip_id = CHIP_ID_NONE,
+    },
+
     // ESP32H2
     {
         .regs = {
-            .cmd  = ESP32xx_SPI_REG_BASE + 0x00,
-            .usr  = ESP32xx_SPI_REG_BASE + 0x18,
-            .usr1 = ESP32xx_SPI_REG_BASE + 0x1c,
-            .usr2 = ESP32xx_SPI_REG_BASE + 0x20,
-            .w0   = ESP32xx_SPI_REG_BASE + 0x58,
-            .mosi_dlen = ESP32xx_SPI_REG_BASE + 0x24,
-            .miso_dlen = ESP32xx_SPI_REG_BASE + 0x28,
+            .cmd  = ESP32H2_SPI_REG_BASE + 0x00,
+            .usr  = ESP32H2_SPI_REG_BASE + 0x18,
+            .usr1 = ESP32H2_SPI_REG_BASE + 0x1c,
+            .usr2 = ESP32H2_SPI_REG_BASE + 0x20,
+            .w0   = ESP32H2_SPI_REG_BASE + 0x58,
+            .mosi_dlen = ESP32H2_SPI_REG_BASE + 0x24,
+            .miso_dlen = ESP32H2_SPI_REG_BASE + 0x28,
         },
-        .efuse_base = 0x6001A000,
-        .chip_magic_value = {0xca26cc22, 0x6881b06f}, // ESP32H2-BETA1, ESP32H2-BETA2
-        .read_spi_config = spi_config_esp32xx,
+        .efuse_base = 0x600B0800,
+        .chip_magic_value = { 0xd7b73e80, 0, 0, 0 },
+        .read_spi_config = spi_config_unsupported,
+        .mac_efuse_offset = 0x44,
+        .encryption_in_begin_flash_cmd = true,
+        .chip_id = 16,
+    },
+
+    // ESP32C6
+    {
+        .regs = {
+            .cmd  = ESP32C6_SPI_REG_BASE + 0x00,
+            .usr  = ESP32C6_SPI_REG_BASE + 0x18,
+            .usr1 = ESP32C6_SPI_REG_BASE + 0x1c,
+            .usr2 = ESP32C6_SPI_REG_BASE + 0x20,
+            .w0   = ESP32C6_SPI_REG_BASE + 0x58,
+            .mosi_dlen = ESP32C6_SPI_REG_BASE + 0x24,
+            .miso_dlen = ESP32C6_SPI_REG_BASE + 0x28,
+        },
+        .efuse_base = 0x600B0800,
+        .chip_magic_value = { 0x2CE0806F, 0, 0, 0 },
+        .read_spi_config = spi_config_unsupported,
+        .mac_efuse_offset = 0x44,
+        .encryption_in_begin_flash_cmd = true,
+        .chip_id = 13,
     },
 };
 
 const target_registers_t *get_esp_target_data(target_chip_t chip)
 {
-    return (target_registers_t *)&esp_target[chip];
+    return (const target_registers_t *)&esp_target[chip];
 }
 
 esp_loader_error_t loader_detect_chip(target_chip_t *target_chip, const target_registers_t **target_data)
 {
+#if (defined SERIAL_FLASHER_INTERFACE_UART) || (defined SERIAL_FLASHER_INTERFACE_USB)
+    /* First, attempt to get the target info using GET_SECURITY_INFO command.
+       This won't work if the target does not support the command. */
+    esp_loader_target_security_info_t security_info;
+
+    if (esp_loader_get_security_info(&security_info) == ESP_LOADER_SUCCESS) {
+        *target_chip = security_info.target_chip;
+        *target_data = (target_registers_t *)&esp_target[security_info.target_chip];
+        return ESP_LOADER_SUCCESS;
+    }
+#endif /* SERIAL_FLASHER_INTERFACE_UART || SERIAL_FLASHER_INTERFACE_USB */
+
     uint32_t magic_value;
     RETURN_ON_ERROR( esp_loader_read_register(CHIP_DETECT_MAGIC_REG_ADDR,  &magic_value) );
 
     for (int chip = 0; chip < ESP_MAX_CHIP; chip++) {
-        for(int index = 0; index < MAX_MAGIC_VALUES; index++) {
+        for (int index = 0; index < MAX_MAGIC_VALUES; index++) {
             if (magic_value == esp_target[chip].chip_magic_value[index]) {
                 *target_chip = (target_chip_t)chip;
                 *target_data = (target_registers_t *)&esp_target[chip];
@@ -180,6 +245,26 @@ esp_loader_error_t loader_read_spi_config(target_chip_t target_chip, uint32_t *s
 {
     const esp_target_t *target = &esp_target[target_chip];
     return target->read_spi_config(target->efuse_base, spi_config);
+}
+
+esp_loader_error_t loader_read_mac(const target_chip_t target_code, uint8_t *mac)
+{
+    const esp_target_t *target = &esp_target[target_code];
+
+    uint32_t part1;
+    uint32_t part2;
+
+    RETURN_ON_ERROR(esp_loader_read_register(target->efuse_base + target->mac_efuse_offset, &part1));
+    RETURN_ON_ERROR(esp_loader_read_register(target->efuse_base + target->mac_efuse_offset + sizeof(uint32_t), &part2));
+
+    mac[0] = (part2 >> 8) & 0xff;
+    mac[1] = (part2 >> 0) & 0xff;
+    mac[2] = (part1 >> 24) & 0xff;
+    mac[3] = (part1 >> 16) & 0xff;
+    mac[4] = (part1 >> 8) & 0xff;
+    mac[5] = (part1 >> 0) & 0xff;
+
+    return ESP_LOADER_SUCCESS;
 }
 
 static inline uint32_t efuse_word_addr(uint32_t efuse_base, uint32_t n)
@@ -242,7 +327,27 @@ static esp_loader_error_t spi_config_esp32xx(uint32_t efuse_base, uint32_t *spi_
     return ESP_LOADER_SUCCESS;
 }
 
-bool encryption_in_begin_flash_cmd(target_chip_t target)
+// Some newer chips like the esp32c6 do not support configurable SPI
+static esp_loader_error_t spi_config_unsupported(uint32_t efuse_base, uint32_t *spi_config)
 {
-    return target == ESP32_CHIP || target == ESP8266_CHIP;
+    (void)(efuse_base);
+
+    *spi_config = 0;
+    return ESP_LOADER_SUCCESS;
+}
+
+bool encryption_in_begin_flash_cmd(const target_chip_t target)
+{
+    return esp_target[target].encryption_in_begin_flash_cmd;
+}
+
+target_chip_t target_from_chip_id(const uint32_t chip_id)
+{
+    for (size_t chip = 0; chip < ESP_MAX_CHIP; chip++) {
+        if (chip_id == esp_target[chip].chip_id) {
+            return (target_chip_t)chip;
+        }
+    }
+
+    return ESP_UNKNOWN_CHIP;
 }

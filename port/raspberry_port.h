@@ -1,4 +1,4 @@
-/* Copyright 2020 Espressif Systems (Shanghai) PTE LTD
+/* Copyright 2020-2023 Espressif Systems (Shanghai) CO LTD
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,11 @@
 #pragma once
 
 #include <stdint.h>
-#include "serial_io.h"
+#include "esp_loader_io.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct {
     const char *device;
@@ -26,3 +30,8 @@ typedef struct {
 } loader_raspberry_config_t;
 
 esp_loader_error_t loader_port_raspberry_init(const loader_raspberry_config_t *config);
+void loader_port_deinit(void);
+
+#ifdef __cplusplus
+}
+#endif

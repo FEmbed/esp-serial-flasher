@@ -1,4 +1,4 @@
-/* Copyright 2020 Espressif Systems (Shanghai) PTE LTD
+/* Copyright 2020-2023 Espressif Systems (Shanghai) CO LTD
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,57 +20,36 @@
 #include <stdio.h>
 #include "stm32_port.h"
 
-// #define SERIAL_DEBUG_ENABLE
-
 static UART_HandleTypeDef *uart;
-static GPIO_TypeDef* gpio_port_io0, *gpio_port_rst;
+static GPIO_TypeDef *gpio_port_io0, *gpio_port_rst;
 static uint16_t gpio_num_io0, gpio_num_rst;
 
-#ifdef SERIAL_DEBUG_ENABLE
-
-static void dec_to_hex_str(const uint8_t dec, uint8_t hex_str[3])
-{
-    static const uint8_t dec_to_hex[] = {
-        '0', '1', '2', '3', '4', '5', '6', '7',
-        '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
-    };
-
-    hex_str[0] = dec_to_hex[(dec >> 4)];
-    hex_str[1] = dec_to_hex[(dec & 0xF)];
-    hex_str[2] = '\0';
-}
-
-static void serial_debug_print(const uint8_t *data, uint16_t size, bool write)
+#if SERIAL_FLASHER_DEBUG_TRACE
+static void transfer_debug_print(const uint8_t *data, uint16_t size, bool write)
 {
     static bool write_prev = false;
-    uint8_t hex_str[3];
 
-    if(write_prev != write) {
+    if (write_prev != write) {
         write_prev = write;
         printf("\n--- %s ---\n", write ? "WRITE" : "READ");
     }
 
-    for(uint32_t i = 0; i < size; i++) {
-        dec_to_hex_str(data[i], hex_str);
-        printf("%s ", hex_str);
+    for (uint32_t i = 0; i < size; i++) {
+        printf("%02x ", data[i]);
     }
 }
-
-#else
-
-static void serial_debug_print(const uint8_t *data, uint16_t size, bool write) { }
-
 #endif
 
 static uint32_t s_time_end;
 
-esp_loader_error_t loader_port_serial_write(const uint8_t *data, uint16_t size, uint32_t timeout)
+esp_loader_error_t loader_port_write(const uint8_t *data, uint16_t size, uint32_t timeout)
 {
-    serial_debug_print(data, size, true);
-
     HAL_StatusTypeDef err = HAL_UART_Transmit(uart, (uint8_t *)data, size, timeout);
 
     if (err == HAL_OK) {
+#if SERIAL_FLASHER_DEBUG_TRACE
+        transfer_debug_print(data, size, true);
+#endif
         return ESP_LOADER_SUCCESS;
     } else if (err == HAL_TIMEOUT) {
         return ESP_LOADER_ERROR_TIMEOUT;
@@ -80,15 +59,14 @@ esp_loader_error_t loader_port_serial_write(const uint8_t *data, uint16_t size, 
 }
 
 
-esp_loader_error_t loader_port_serial_read(uint8_t *data, uint16_t size, uint32_t timeout)
+esp_loader_error_t loader_port_read(uint8_t *data, uint16_t size, uint32_t timeout)
 {
-    memset(data, 0x22, size);
-
     HAL_StatusTypeDef err = HAL_UART_Receive(uart, data, size, timeout);
 
-    serial_debug_print(data, size, false);
-
     if (err == HAL_OK) {
+#if SERIAL_FLASHER_DEBUG_TRACE
+        transfer_debug_print(data, size, false);
+#endif
         return ESP_LOADER_SUCCESS;
     } else if (err == HAL_TIMEOUT) {
         return ESP_LOADER_ERROR_TIMEOUT;
@@ -101,7 +79,7 @@ void loader_port_stm32_init(loader_stm32_config_t *config)
 
 {
     uart = config->huart;
-    gpio_port_io0 = config->port_io0; 
+    gpio_port_io0 = config->port_io0;
     gpio_port_rst = config->port_rst;
     gpio_num_io0 = config->pin_num_io0;
     gpio_num_rst = config->pin_num_rst;
@@ -111,20 +89,18 @@ void loader_port_stm32_init(loader_stm32_config_t *config)
 // assert reset pin for 100 milliseconds.
 void loader_port_enter_bootloader(void)
 {
-    HAL_GPIO_WritePin(gpio_port_rst, gpio_num_rst, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(gpio_port_io0, gpio_num_io0, GPIO_PIN_RESET);
-    HAL_Delay(1);
-    HAL_GPIO_WritePin(gpio_port_rst, gpio_num_rst, GPIO_PIN_SET);
-    HAL_Delay(100);
-    HAL_GPIO_WritePin(gpio_port_io0, gpio_num_io0, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(gpio_port_io0, gpio_num_io0, SERIAL_FLASHER_BOOT_INVERT ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    loader_port_reset_target();
+    HAL_Delay(SERIAL_FLASHER_BOOT_HOLD_TIME_MS);
+    HAL_GPIO_WritePin(gpio_port_io0, gpio_num_io0, SERIAL_FLASHER_BOOT_INVERT ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
 
 
 void loader_port_reset_target(void)
 {
-    HAL_GPIO_WritePin(gpio_port_rst, gpio_num_rst, GPIO_PIN_RESET);
-    HAL_Delay(100);
-    HAL_GPIO_WritePin(gpio_port_rst, gpio_num_rst, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(gpio_port_rst, gpio_num_rst, SERIAL_FLASHER_RESET_INVERT ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_Delay(SERIAL_FLASHER_RESET_HOLD_TIME_MS);
+    HAL_GPIO_WritePin(gpio_port_rst, gpio_num_rst, SERIAL_FLASHER_RESET_INVERT ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
 
 
@@ -152,11 +128,11 @@ void loader_port_debug_print(const char *str)
     printf("DEBUG: %s", str);
 }
 
-esp_loader_error_t loader_port_change_baudrate(uint32_t baudrate)
+esp_loader_error_t loader_port_change_transmission_rate(uint32_t baudrate)
 {
     uart->Init.BaudRate = baudrate;
 
-    if( HAL_UART_Init(uart) != HAL_OK ) {
+    if ( HAL_UART_Init(uart) != HAL_OK ) {
         return ESP_LOADER_ERROR_FAIL;
     }
 
