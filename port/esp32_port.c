@@ -105,7 +105,7 @@ void loader_port_esp32_deinit(void)
     }
 }
 
-#if 1
+#if 0
 static uint8_t s_loader_data_cache[2100];
 static uint16_t s_loader_data_count = 0;
 esp_loader_error_t loader_port_write(const uint8_t *data, uint16_t size, uint32_t timeout)
