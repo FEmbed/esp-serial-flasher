@@ -35,9 +35,10 @@ files_to_download = [
     "esp32c3.json",  # ESP32C3_CHIP
     "esp32s3.json",  # ESP32S3_CHIP
     "esp32c2.json",  # ESP32C2_CHIP
-    None,  # ESP32_RESERVED0_CHIP
+    None,  # ESP32C5_CHIP (stub not included for now)
     "esp32h2.json",  # ESP32H2_CHIP
     "esp32c6.json",  # ESP32C6_CHIP
+    None,  # ESP32P4_CHIP (stub not included for now)
 ]
 
 
@@ -68,12 +69,12 @@ def read_stub_json(json_file):
             {{
                 .addr = {text_start},
                 .size = {text_size},
-                .data = (uint8_t[]){{{text_str}}},
+                .data = (const uint8_t[]){{{text_str}}},
             }},
             {{
                 .addr = {data_start},
                 .size = {data_size},
-                .data = (uint8_t[]){{{data_str}}},
+                .data = (const uint8_t[]){{{data_str}}},
             }},
         }},
     }},

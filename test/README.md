@@ -1,4 +1,4 @@
-# Serial flasher Tests
+# Serial Flasher Tests
 
 ## Overview
 
@@ -7,7 +7,7 @@ The two kinds of tests are written for serial flasher:
 * Qemu tests
 * Target tests
 
-## Qemu tests
+## Qemu Tests
 
 Qemu tests use emulated esp32 to test the correctness of the library.
 
@@ -22,7 +22,7 @@ export QEMU_PATH=path_to_qemu-system-xtensa
 ./run_qemu_test.sh
 ```
 
-## Target tests
+## Target Tests
 
 To install all the necessary tools for running the Build and Target tests just run the following command:
 
@@ -37,6 +37,7 @@ python -m idf_build_apps build -v -p .
       --recursive
       --exclude ./examples/binaries
       --config "sdkconfig.defaults*"
+      --build-dir "build_"@w
       --check-warnings
 ```
 
