@@ -54,6 +54,7 @@ typedef struct {
     uint32_t      queue_size;            /*!< UART event queue depth; 0 = no queue */
     QueueHandle_t *uart_queue;           /*!< Written with the queue handle if non-NULL */
     bool          dont_initialize_peripheral; /*!< Skip UART driver init if already done */
+    bool          skip_control_pin_init; /*!< Skip RESET/BOOT GPIO init for data-only UART users */
 
     /* Private runtime state — do not access directly */
     int64_t       _time_end;

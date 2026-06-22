@@ -71,13 +71,17 @@ static esp_loader_error_t esp32_port_init(esp_loader_port_t *port)
         p->_peripheral_needs_deinit = true;
     }
 
-    gpio_reset_pin(p->reset_pin);
-    gpio_set_pull_mode(p->reset_pin, GPIO_PULLUP_ONLY);
-    gpio_set_direction(p->reset_pin, GPIO_MODE_OUTPUT);
+    if (!p->skip_control_pin_init) {
+        gpio_reset_pin(p->reset_pin);
+        gpio_set_pull_mode(p->reset_pin, GPIO_PULLUP_ONLY);
+        gpio_set_level(p->reset_pin, SERIAL_FLASHER_RESET_INVERT ? 0 : 1);
+        gpio_set_direction(p->reset_pin, GPIO_MODE_OUTPUT);
 
-    gpio_reset_pin(p->boot_pin);
-    gpio_set_pull_mode(p->boot_pin, GPIO_PULLUP_ONLY);
-    gpio_set_direction(p->boot_pin, GPIO_MODE_OUTPUT);
+        gpio_reset_pin(p->boot_pin);
+        gpio_set_pull_mode(p->boot_pin, GPIO_PULLUP_ONLY);
+        gpio_set_level(p->boot_pin, SERIAL_FLASHER_BOOT_INVERT ? 0 : 1);
+        gpio_set_direction(p->boot_pin, GPIO_MODE_OUTPUT);
+    }
 
     return ESP_LOADER_SUCCESS;
 }
