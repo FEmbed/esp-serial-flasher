@@ -95,6 +95,31 @@ static void esp32_port_deinit(esp_loader_port_t *port)
         uart_driver_delete((uart_port_t)p->uart_port);
         p->_peripheral_needs_deinit = false;
     }
+
+    // The G1 target header is shared by RFC2217, ESP flashing and DAP/SWD.
+    // Detach pads on deinit so a failed stub connection or a later owner does
+    // not inherit stale UART matrix routing or held BOOT/RESET levels.
+    if (!p->dont_initialize_peripheral) {
+        if (GPIO_IS_VALID_GPIO(p->uart_tx_pin)) {
+            gpio_reset_pin(p->uart_tx_pin);
+        }
+        if (GPIO_IS_VALID_GPIO(p->uart_rx_pin)) {
+            gpio_reset_pin(p->uart_rx_pin);
+        }
+    }
+
+    if (!p->skip_control_pin_init) {
+        if (GPIO_IS_VALID_GPIO(p->reset_pin)) {
+            gpio_set_level(p->reset_pin, SERIAL_FLASHER_RESET_INVERT ? 0 : 1);
+            gpio_reset_pin(p->reset_pin);
+            gpio_set_pull_mode(p->reset_pin, GPIO_PULLUP_ONLY);
+        }
+        if (GPIO_IS_VALID_GPIO(p->boot_pin)) {
+            gpio_set_level(p->boot_pin, SERIAL_FLASHER_BOOT_INVERT ? 0 : 1);
+            gpio_reset_pin(p->boot_pin);
+            gpio_set_pull_mode(p->boot_pin, GPIO_PULLUP_ONLY);
+        }
+    }
 }
 
 
