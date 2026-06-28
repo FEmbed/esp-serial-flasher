@@ -73,6 +73,8 @@ typedef struct {
     /* Private runtime state — do not access directly */
     cdc_acm_dev_hdl_t    _acm_device;
     StreamBufferHandle_t _rx_stream_buffer;
+    StaticStreamBuffer_t *_rx_stream_buffer_struct;
+    uint8_t *_rx_stream_storage;
     bool                 _is_usb_serial_jtag;
     int64_t              _time_end;
 } esp32_usb_cdc_acm_port_t;

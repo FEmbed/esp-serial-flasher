@@ -8,12 +8,14 @@
 #include <stdio.h>
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "usb/cdc_acm_host.h"
 #include "usb/vcp_cp210x.h"
 #include "usb/vcp_ch34x.h"
 #include "esp32_usb_cdc_acm_port.h"
 
 static const char *TAG = "usb_cdc_acm_port";
+#define ESP32_USB_CDC_RX_STREAM_BUFFER_SIZE 4096
 
 #if SERIAL_FLASHER_DEBUG_TRACE
 static void transfer_debug_print(const uint8_t *data, const uint16_t size, const bool write)
@@ -40,16 +42,24 @@ static void usb_port_deinit_impl(esp32_usb_cdc_acm_port_t *p)
     p->acm_host_serial_state_callback = NULL;
     p->_is_usb_serial_jtag            = false;
 
-    if (p->_rx_stream_buffer != NULL) {
-        vStreamBufferDelete(p->_rx_stream_buffer);
-        p->_rx_stream_buffer = NULL;
-    }
-
     if (p->_acm_device != NULL) {
         if (cdc_acm_host_close(p->_acm_device) != ESP_OK) {
             ESP_LOGE(TAG, "Could not close device");
         }
         p->_acm_device = NULL;
+    }
+
+    if (p->_rx_stream_buffer != NULL) {
+        vStreamBufferDelete(p->_rx_stream_buffer);
+        p->_rx_stream_buffer = NULL;
+    }
+    if (p->_rx_stream_storage != NULL) {
+        heap_caps_free(p->_rx_stream_storage);
+        p->_rx_stream_storage = NULL;
+    }
+    if (p->_rx_stream_buffer_struct != NULL) {
+        heap_caps_free(p->_rx_stream_buffer_struct);
+        p->_rx_stream_buffer_struct = NULL;
     }
 }
 
@@ -105,9 +115,20 @@ static esp_loader_error_t esp32_usb_port_init(esp_loader_port_t *port)
 {
     esp32_usb_cdc_acm_port_t *p = container_of(port, esp32_usb_cdc_acm_port_t, port);
 
-    p->_rx_stream_buffer = xStreamBufferCreate(1024, 1);
+    p->_rx_stream_storage = heap_caps_malloc(ESP32_USB_CDC_RX_STREAM_BUFFER_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    p->_rx_stream_buffer_struct = heap_caps_malloc(sizeof(StaticStreamBuffer_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (p->_rx_stream_storage == NULL || p->_rx_stream_buffer_struct == NULL) {
+        ESP_LOGE(TAG, "Could not allocate internal RX stream buffer for USB data reception");
+        usb_port_deinit_impl(p);
+        return ESP_LOADER_ERROR_FAIL;
+    }
+    p->_rx_stream_buffer = xStreamBufferCreateStatic(ESP32_USB_CDC_RX_STREAM_BUFFER_SIZE,
+                                                     1,
+                                                     p->_rx_stream_storage,
+                                                     p->_rx_stream_buffer_struct);
     if (p->_rx_stream_buffer == NULL) {
-        ESP_LOGE(TAG, "Could not create the stream buffer for USB data reception");
+        ESP_LOGE(TAG, "Could not create the internal stream buffer for USB data reception");
+        usb_port_deinit_impl(p);
         return ESP_LOADER_ERROR_FAIL;
     }
 
