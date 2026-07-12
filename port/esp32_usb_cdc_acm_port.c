@@ -13,6 +13,7 @@
 #include "esp_private/cdc_host_common.h"
 #include "usb/vcp_cp210x.h"
 #include "usb/vcp_ch34x.h"
+#include "usb/vcp_ftdi.h"
 #include "esp32_usb_cdc_acm_port.h"
 
 static const char *TAG = "usb_cdc_acm_port";
@@ -42,6 +43,9 @@ static void usb_port_deinit_impl(esp32_usb_cdc_acm_port_t *p)
     p->device_disconnected_callback   = NULL;
     p->acm_host_serial_state_callback = NULL;
     p->_is_usb_serial_jtag            = false;
+    p->_driver_kind                   = ESP32_USB_CDC_DRIVER_NONE;
+    p->_opened_vid                    = 0;
+    p->_opened_pid                    = 0;
 
     if (p->_acm_device != NULL) {
         if (cdc_acm_host_close(p->_acm_device) != ESP_OK) {
@@ -68,12 +72,16 @@ static esp_err_t open_detected_usb_serial_device(uint16_t vid,
                                                  uint16_t pid,
                                                  const cdc_acm_host_device_config_t *dev_config,
                                                  cdc_acm_dev_hdl_t *cdc_hdl_ret,
-                                                 bool *is_usb_serial_jtag)
+                                                 bool *is_usb_serial_jtag,
+                                                 esp32_usb_cdc_driver_kind_t *driver_kind)
 {
     if (vid == ESPRESSIF_VID && pid == ESP_SERIAL_JTAG_PID) {
         esp_err_t err = cdc_acm_host_open(vid, pid, 0, dev_config, cdc_hdl_ret);
         if (err == ESP_OK && is_usb_serial_jtag != NULL) {
             *is_usb_serial_jtag = true;
+        }
+        if (err == ESP_OK && driver_kind != NULL) {
+            *driver_kind = ESP32_USB_CDC_DRIVER_ESP_SERIAL_JTAG;
         }
         return err;
     }
@@ -82,6 +90,9 @@ static esp_err_t open_detected_usb_serial_device(uint16_t vid,
         if (err == ESP_OK && is_usb_serial_jtag != NULL) {
             *is_usb_serial_jtag = false;
         }
+        if (err == ESP_OK && driver_kind != NULL) {
+            *driver_kind = ESP32_USB_CDC_DRIVER_CP210X;
+        }
         return err;
     }
     if (vid == NANJING_QINHENG_MICROE_VID) {
@@ -89,12 +100,28 @@ static esp_err_t open_detected_usb_serial_device(uint16_t vid,
         if (err == ESP_OK && is_usb_serial_jtag != NULL) {
             *is_usb_serial_jtag = false;
         }
+        if (err == ESP_OK && driver_kind != NULL) {
+            *driver_kind = ESP32_USB_CDC_DRIVER_CH34X;
+        }
+        return err;
+    }
+    if (vid == FTDI_VID) {
+        esp_err_t err = ftdi_vcp_open(pid, 0, dev_config, cdc_hdl_ret);
+        if (err == ESP_OK && is_usb_serial_jtag != NULL) {
+            *is_usb_serial_jtag = false;
+        }
+        if (err == ESP_OK && driver_kind != NULL) {
+            *driver_kind = ESP32_USB_CDC_DRIVER_FTDI;
+        }
         return err;
     }
 
     esp_err_t err = cdc_acm_host_open(vid, pid, 0, dev_config, cdc_hdl_ret);
     if (err == ESP_OK && is_usb_serial_jtag != NULL) {
         *is_usb_serial_jtag = false;
+    }
+    if (err == ESP_OK && driver_kind != NULL) {
+        *driver_kind = ESP32_USB_CDC_DRIVER_GENERIC_ACM;
     }
     return err;
 }
@@ -107,6 +134,11 @@ static bool pid_is_cp210x(uint16_t pid)
 static bool pid_is_ch34x(uint16_t pid)
 {
     return pid == CH340_PID || pid == CH340_PID_1 || pid == CH341_PID;
+}
+
+static bool pid_is_ftdi(uint16_t pid)
+{
+    return pid == FT232_PID || pid == FT231_PID;
 }
 
 static void log_opened_usb_serial_device(cdc_acm_dev_hdl_t cdc_hdl)
@@ -122,10 +154,22 @@ static void log_opened_usb_serial_device(cdc_acm_dev_hdl_t cdc_hdl)
     }
 }
 
+static void capture_opened_usb_serial_device(esp32_usb_cdc_acm_port_t *p)
+{
+    const usb_device_desc_t *device_desc = NULL;
+    if (usb_host_get_device_descriptor(((cdc_dev_t *)p->_acm_device)->dev_hdl,
+                                       &device_desc) == ESP_OK &&
+        device_desc != NULL) {
+        p->_opened_vid = device_desc->idVendor;
+        p->_opened_pid = device_desc->idProduct;
+    }
+}
+
 static esp_err_t open_auto_detected_usb_serial_device(const esp32_usb_cdc_acm_port_t *p,
                                                       const cdc_acm_host_device_config_t *dev_config,
                                                       cdc_acm_dev_hdl_t *cdc_hdl_ret,
-                                                      bool *is_usb_serial_jtag)
+                                                      bool *is_usb_serial_jtag,
+                                                      esp32_usb_cdc_driver_kind_t *driver_kind)
 {
     const bool vid_auto = p->device_vid == USB_VID_PID_AUTO_DETECT;
     const bool pid_auto = p->device_pid == USB_VID_PID_AUTO_DETECT;
@@ -147,6 +191,9 @@ static esp_err_t open_auto_detected_usb_serial_device(const esp32_usb_cdc_acm_po
             if (is_usb_serial_jtag != NULL) {
                 *is_usb_serial_jtag = false;
             }
+            if (driver_kind != NULL) {
+                *driver_kind = ESP32_USB_CDC_DRIVER_CP210X;
+            }
             log_opened_usb_serial_device(*cdc_hdl_ret);
             return ESP_OK;
         }
@@ -159,6 +206,25 @@ static esp_err_t open_auto_detected_usb_serial_device(const esp32_usb_cdc_acm_po
         if (err == ESP_OK) {
             if (is_usb_serial_jtag != NULL) {
                 *is_usb_serial_jtag = false;
+            }
+            if (driver_kind != NULL) {
+                *driver_kind = ESP32_USB_CDC_DRIVER_CH34X;
+            }
+            log_opened_usb_serial_device(*cdc_hdl_ret);
+            return ESP_OK;
+        }
+    }
+
+    if ((vid_auto || p->device_vid == FTDI_VID) &&
+        (pid_auto || pid_is_ftdi(p->device_pid))) {
+        const uint16_t pid = pid_auto ? FTDI_PID_AUTO : p->device_pid;
+        esp_err_t err = ftdi_vcp_open(pid, 0, &probe_config, cdc_hdl_ret);
+        if (err == ESP_OK) {
+            if (is_usb_serial_jtag != NULL) {
+                *is_usb_serial_jtag = false;
+            }
+            if (driver_kind != NULL) {
+                *driver_kind = ESP32_USB_CDC_DRIVER_FTDI;
             }
             log_opened_usb_serial_device(*cdc_hdl_ret);
             return ESP_OK;
@@ -177,6 +243,9 @@ static esp_err_t open_auto_detected_usb_serial_device(const esp32_usb_cdc_acm_po
             if (is_usb_serial_jtag != NULL) {
                 *is_usb_serial_jtag = true;
             }
+            if (driver_kind != NULL) {
+                *driver_kind = ESP32_USB_CDC_DRIVER_ESP_SERIAL_JTAG;
+            }
             log_opened_usb_serial_device(*cdc_hdl_ret);
             return ESP_OK;
         }
@@ -192,6 +261,9 @@ static esp_err_t open_auto_detected_usb_serial_device(const esp32_usb_cdc_acm_po
     if (err == ESP_OK) {
         if (is_usb_serial_jtag != NULL) {
             *is_usb_serial_jtag = false;
+        }
+        if (driver_kind != NULL) {
+            *driver_kind = ESP32_USB_CDC_DRIVER_GENERIC_ACM;
         }
         log_opened_usb_serial_device(*cdc_hdl_ret);
         return ESP_OK;
@@ -284,7 +356,9 @@ static esp_loader_error_t esp32_usb_port_init(esp_loader_port_t *port)
         if (open_auto_detected_usb_serial_device(p,
                                                  &dev_config,
                                                  &p->_acm_device,
-                                                 &p->_is_usb_serial_jtag) == ESP_OK) {
+                                                 &p->_is_usb_serial_jtag,
+                                                 &p->_driver_kind) == ESP_OK) {
+            capture_opened_usb_serial_device(p);
             return ESP_LOADER_SUCCESS;
         }
     } else {
@@ -292,8 +366,10 @@ static esp_loader_error_t esp32_usb_port_init(esp_loader_port_t *port)
                                                         p->device_pid,
                                                         &dev_config,
                                                         &p->_acm_device,
-                                                        &p->_is_usb_serial_jtag);
+                                                        &p->_is_usb_serial_jtag,
+                                                        &p->_driver_kind);
         if (err == ESP_OK) {
+            capture_opened_usb_serial_device(p);
             return ESP_LOADER_SUCCESS;
         }
     }

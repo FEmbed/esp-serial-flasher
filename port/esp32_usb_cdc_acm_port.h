@@ -34,6 +34,15 @@ extern "C" {
 
 typedef void (*loader_port_esp32_usb_cdc_acm_callback_t)(void);
 
+typedef enum {
+    ESP32_USB_CDC_DRIVER_NONE = 0,
+    ESP32_USB_CDC_DRIVER_ESP_SERIAL_JTAG,
+    ESP32_USB_CDC_DRIVER_CP210X,
+    ESP32_USB_CDC_DRIVER_CH34X,
+    ESP32_USB_CDC_DRIVER_FTDI,
+    ESP32_USB_CDC_DRIVER_GENERIC_ACM,
+} esp32_usb_cdc_driver_kind_t;
+
 /**
  * @brief Concrete ESP32 USB CDC-ACM port instance.
  *
@@ -76,6 +85,9 @@ typedef struct {
     StaticStreamBuffer_t *_rx_stream_buffer_struct;
     uint8_t *_rx_stream_storage;
     bool                 _is_usb_serial_jtag;
+    esp32_usb_cdc_driver_kind_t _driver_kind;
+    uint16_t             _opened_vid;
+    uint16_t             _opened_pid;
     int64_t              _time_end;
 } esp32_usb_cdc_acm_port_t;
 

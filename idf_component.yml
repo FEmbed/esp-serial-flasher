@@ -14,6 +14,10 @@ dependencies:
     version: "^2.2"
     rules:
       - if: "target in [esp32s2, esp32s3, esp32p4]"
+  usb_host_ftdi_vcp:
+    version: "^2.1"
+    rules:
+      - if: "target in [esp32s2, esp32s3, esp32p4]"
 files:
    exclude:
     - ".cache/**/*"
