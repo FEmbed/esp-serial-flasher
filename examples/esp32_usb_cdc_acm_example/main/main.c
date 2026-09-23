@@ -103,15 +103,15 @@ void app_main(void)
         .out_buffer_size              = 4096,
         .device_disconnected_callback = device_disconnected_callback,
     };
+    device_disconnected_sem = xSemaphoreCreateBinary();
+    assert(device_disconnected_sem);
 
     while (true) {
+        xSemaphoreTake(device_disconnected_sem, 0);
         ESP_LOGI(TAG, "Opening CDC ACM device 0x%04X:0x%04X...", port.device_vid, port.device_pid);
         if (esp_loader_init_serial(&loader, &port.port) != ESP_LOADER_SUCCESS) {
             continue;
         }
-
-        device_disconnected_sem = xSemaphoreCreateBinary();
-        assert(device_disconnected_sem);
 
         /* The ESP32-S3 ignores the line coding set commands,
            so we don't set the higher baudrate argument */
@@ -130,5 +130,7 @@ void app_main(void)
 
         /* Wait for device disconnection and start over */
         xSemaphoreTake(device_disconnected_sem, portMAX_DELAY);
+        // Only the owner closes after all loader calls return; callback only signals.
+        esp_loader_deinit(&loader);
     }
 }

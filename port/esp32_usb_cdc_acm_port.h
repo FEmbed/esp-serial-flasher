@@ -51,8 +51,9 @@ typedef enum {
  * USB device open is called automatically inside esp_loader_init_serial() —
  * no separate init step is needed.
  *
- * The port can be reused after a device disconnect: call
- * esp_loader_init_serial() again to reopen the device.
+ * One owner task serializes init/I/O/deinit. Callbacks only notify that owner;
+ * they must not close/reopen the port or release its storage. After disconnect,
+ * the owner must call esp_loader_deinit() before reinitializing the port.
  *
  * @code
  *   esp32_usb_cdc_acm_port_t port = {
@@ -89,10 +90,27 @@ typedef struct {
     uint16_t             _opened_vid;
     uint16_t             _opened_pid;
     int64_t              _time_end;
+    uint32_t            _disconnected;  /*!< Atomic latch, cleared only before opening a new session */
 } esp32_usb_cdc_acm_port_t;
+
+/* Latch is shared with the CDC callback; handles/storage belong only to the owner.
+ * Kept as a C/C++ compatible integer, accessed exclusively through atomic builtins. */
+static inline bool esp32_usb_cdc_acm_connected(const esp32_usb_cdc_acm_port_t *p)
+{
+    return p && !__atomic_load_n(&p->_disconnected, __ATOMIC_ACQUIRE) &&
+           p->_acm_device != NULL && p->_rx_stream_buffer != NULL;
+}
+
+static inline void esp32_usb_cdc_acm_disconnected(esp32_usb_cdc_acm_port_t *p)
+{
+    __atomic_store_n(&p->_disconnected, 1, __ATOMIC_RELEASE);
+}
 
 /** Port operations vtable for the ESP32 USB CDC-ACM port. */
 extern const esp_loader_port_ops_t esp32_usb_cdc_acm_ops;
+
+/** One checked DTR/RTS normal-boot sequence; no reopen/retry and no claim of target boot health. */
+esp_loader_error_t esp32_usb_cdc_acm_boot_target(esp32_usb_cdc_acm_port_t *port);
 
 #ifdef __cplusplus
 }

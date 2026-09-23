@@ -35,13 +35,12 @@ static void transfer_debug_print(const uint8_t *data, const uint16_t size, const
 }
 #endif
 
-/* ─── internal deinit (shared by ops->deinit and the disconnect handler) ─── */
+/* ─── owner-only deinit: never free resources from a CDC callback ───────── */
 
 static void usb_port_deinit_impl(esp32_usb_cdc_acm_port_t *p)
 {
-    p->acm_host_error_callback        = NULL;
-    p->device_disconnected_callback   = NULL;
-    p->acm_host_serial_state_callback = NULL;
+    esp32_usb_cdc_acm_disconnected(p);
+    // Configuration callbacks remain immutable until the owner has closed the session.
     p->_is_usb_serial_jtag            = false;
     p->_driver_kind                   = ESP32_USB_CDC_DRIVER_NONE;
     p->_opened_vid                    = 0;
@@ -276,6 +275,7 @@ static esp_err_t open_auto_detected_usb_serial_device(const esp32_usb_cdc_acm_po
 static bool handle_usb_data(const uint8_t *data, size_t data_len, void *arg)
 {
     esp32_usb_cdc_acm_port_t *p = (esp32_usb_cdc_acm_port_t *)arg;
+    if (__atomic_load_n(&p->_disconnected, __ATOMIC_ACQUIRE)) return true;
     size_t sent = xStreamBufferSend(p->_rx_stream_buffer, data, data_len, 0);
     if (sent != data_len) {
         ESP_LOGW(TAG, "RX stream buffer full: dropped %u bytes", (unsigned)(data_len - sent));
@@ -298,10 +298,11 @@ static void handle_usb_event(const cdc_acm_host_dev_event_data_t *event, void *u
 
     case CDC_ACM_HOST_DEVICE_DISCONNECTED:
         ESP_LOGI(TAG, "Device disconnected");
+        // 作业可能还在 CDC TX/control 或 stream receive 中。只标记失联，不能在回调中释放句柄/缓冲。
+        esp32_usb_cdc_acm_disconnected(p);
         if (p->device_disconnected_callback != NULL) {
             p->device_disconnected_callback();
         }
-        usb_port_deinit_impl(p);
         break;
 
     case CDC_ACM_HOST_SERIAL_STATE:
@@ -322,6 +323,11 @@ static void handle_usb_event(const cdc_acm_host_dev_event_data_t *event, void *u
 static esp_loader_error_t esp32_usb_port_init(esp_loader_port_t *port)
 {
     esp32_usb_cdc_acm_port_t *p = container_of(port, esp32_usb_cdc_acm_port_t, port);
+
+    // 断线不是 deinit；旧 owner 未关闭前拒绝覆盖资源或重新选择设备。
+    if (p->_acm_device || p->_rx_stream_buffer || p->_rx_stream_storage || p->_rx_stream_buffer_struct)
+        return ESP_LOADER_ERROR_INVALID_PARAM;
+    __atomic_store_n(&p->_disconnected, 0, __ATOMIC_RELEASE);
 
     p->_rx_stream_storage = heap_caps_malloc(ESP32_USB_CDC_RX_STREAM_BUFFER_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     p->_rx_stream_buffer_struct = heap_caps_malloc(sizeof(StaticStreamBuffer_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -358,8 +364,10 @@ static esp_loader_error_t esp32_usb_port_init(esp_loader_port_t *port)
                                                  &p->_acm_device,
                                                  &p->_is_usb_serial_jtag,
                                                  &p->_driver_kind) == ESP_OK) {
-            capture_opened_usb_serial_device(p);
-            return ESP_LOADER_SUCCESS;
+            if (esp32_usb_cdc_acm_connected(p)) {
+                capture_opened_usb_serial_device(p);
+                return ESP_LOADER_SUCCESS;
+            }
         }
     } else {
         esp_err_t err = open_detected_usb_serial_device(p->device_vid,
@@ -369,8 +377,10 @@ static esp_loader_error_t esp32_usb_port_init(esp_loader_port_t *port)
                                                         &p->_is_usb_serial_jtag,
                                                         &p->_driver_kind);
         if (err == ESP_OK) {
-            capture_opened_usb_serial_device(p);
-            return ESP_LOADER_SUCCESS;
+            if (esp32_usb_cdc_acm_connected(p)) {
+                capture_opened_usb_serial_device(p);
+                return ESP_LOADER_SUCCESS;
+            }
         }
     }
 
@@ -398,42 +408,44 @@ static void esp32_usb_delay_ms(esp_loader_port_t *port, uint32_t ms)
 
 static void usb_serial_jtag_reset_target(esp32_usb_cdc_acm_port_t *p)
 {
+    if (!esp32_usb_cdc_acm_connected(p)) return;
     xStreamBufferReset(p->_rx_stream_buffer);
-    cdc_acm_host_set_control_line_state(p->_acm_device, false, true);
+    if (cdc_acm_host_set_control_line_state(p->_acm_device, false, true) != ESP_OK) return;
     usb_delay_ms_raw(SERIAL_FLASHER_RESET_HOLD_TIME_MS);
+    if (!esp32_usb_cdc_acm_connected(p)) return;
     cdc_acm_host_set_control_line_state(p->_acm_device, false, false);
 }
 
 static void usb_serial_jtag_enter_bootloader(esp32_usb_cdc_acm_port_t *p)
 {
-    cdc_acm_host_set_control_line_state(p->_acm_device, true, false);
+    if (cdc_acm_host_set_control_line_state(p->_acm_device, true, false) != ESP_OK) return;
     usb_delay_ms_raw(SERIAL_FLASHER_BOOT_HOLD_TIME_MS);
-    cdc_acm_host_set_control_line_state(p->_acm_device, true, true);
+    if (!esp32_usb_cdc_acm_connected(p) ||
+        cdc_acm_host_set_control_line_state(p->_acm_device, true, true) != ESP_OK) return;
     usb_serial_jtag_reset_target(p);
 }
 
 static void usb_serial_converter_reset_target(esp32_usb_cdc_acm_port_t *p)
 {
-    xStreamBufferReset(p->_rx_stream_buffer);
-    cdc_acm_host_set_control_line_state(p->_acm_device, false, true);
-    usb_delay_ms_raw(SERIAL_FLASHER_RESET_HOLD_TIME_MS);
-    cdc_acm_host_set_control_line_state(p->_acm_device, false, false);
+    usb_serial_jtag_reset_target(p);
 }
 
 static void usb_serial_converter_enter_bootloader(esp32_usb_cdc_acm_port_t *p)
 {
     xStreamBufferReset(p->_rx_stream_buffer);
-    cdc_acm_host_set_control_line_state(p->_acm_device, false, true);
+    if (cdc_acm_host_set_control_line_state(p->_acm_device, false, true) != ESP_OK) return;
     usb_delay_ms_raw(SERIAL_FLASHER_BOOT_HOLD_TIME_MS);
-    cdc_acm_host_set_control_line_state(p->_acm_device, true, false);
+    if (!esp32_usb_cdc_acm_connected(p) ||
+        cdc_acm_host_set_control_line_state(p->_acm_device, true, false) != ESP_OK) return;
     usb_delay_ms_raw(SERIAL_FLASHER_RESET_HOLD_TIME_MS);
+    if (!esp32_usb_cdc_acm_connected(p)) return;
     cdc_acm_host_set_control_line_state(p->_acm_device, false, false);
 }
 
 static void esp32_usb_enter_bootloader(esp_loader_port_t *port)
 {
     esp32_usb_cdc_acm_port_t *p = container_of(port, esp32_usb_cdc_acm_port_t, port);
-    assert(p->_acm_device != NULL && p->_rx_stream_buffer != NULL);
+    if (!esp32_usb_cdc_acm_connected(p)) return;
 
     if (p->_is_usb_serial_jtag) {
         usb_serial_jtag_enter_bootloader(p);
@@ -445,7 +457,7 @@ static void esp32_usb_enter_bootloader(esp_loader_port_t *port)
 static void esp32_usb_reset_target(esp_loader_port_t *port)
 {
     esp32_usb_cdc_acm_port_t *p = container_of(port, esp32_usb_cdc_acm_port_t, port);
-    assert(p->_acm_device != NULL && p->_rx_stream_buffer != NULL);
+    if (!esp32_usb_cdc_acm_connected(p)) return;
 
     if (p->_is_usb_serial_jtag) {
         usb_serial_jtag_reset_target(p);
@@ -478,11 +490,12 @@ static esp_loader_error_t esp32_usb_write(esp_loader_port_t *port, const uint8_t
 {
     esp32_usb_cdc_acm_port_t *p = container_of(port, esp32_usb_cdc_acm_port_t, port);
     assert(data != NULL);
-    assert(p->_acm_device != NULL && p->_rx_stream_buffer != NULL);
+    if (!esp32_usb_cdc_acm_connected(p)) return ESP_LOADER_ERROR_FAIL;
 
     esp_err_t err = cdc_acm_host_data_tx_blocking(p->_acm_device,
                     (uint8_t *)data, size, timeout);
 
+    if (!esp32_usb_cdc_acm_connected(p)) return ESP_LOADER_ERROR_FAIL;
     if (err == ESP_OK) {
 #if SERIAL_FLASHER_DEBUG_TRACE
         transfer_debug_print(data, size, true);
@@ -499,10 +512,11 @@ static esp_loader_error_t esp32_usb_read(esp_loader_port_t *port, uint8_t *data,
 {
     esp32_usb_cdc_acm_port_t *p = container_of(port, esp32_usb_cdc_acm_port_t, port);
     assert(data != NULL);
-    assert(p->_acm_device != NULL && p->_rx_stream_buffer != NULL);
+    if (!esp32_usb_cdc_acm_connected(p)) return ESP_LOADER_ERROR_FAIL;
 
     size_t received = xStreamBufferReceive(p->_rx_stream_buffer, data, size, pdMS_TO_TICKS(timeout));
 
+    if (!esp32_usb_cdc_acm_connected(p)) return ESP_LOADER_ERROR_FAIL;
     if (received == size) {
 #if SERIAL_FLASHER_DEBUG_TRACE
         transfer_debug_print(data, size, false);
@@ -516,7 +530,7 @@ static esp_loader_error_t esp32_usb_read(esp_loader_port_t *port, uint8_t *data,
 static esp_loader_error_t esp32_usb_change_rate(esp_loader_port_t *port, uint32_t baudrate)
 {
     esp32_usb_cdc_acm_port_t *p = container_of(port, esp32_usb_cdc_acm_port_t, port);
-    assert(p->_acm_device != NULL && p->_rx_stream_buffer != NULL);
+    if (!esp32_usb_cdc_acm_connected(p)) return ESP_LOADER_ERROR_FAIL;
 
     cdc_acm_line_coding_t line_coding;
     if (cdc_acm_host_line_coding_get(p->_acm_device, &line_coding) != ESP_OK) {
@@ -525,11 +539,11 @@ static esp_loader_error_t esp32_usb_change_rate(esp_loader_port_t *port, uint32_
 
     line_coding.dwDTERate = baudrate;
 
-    if (cdc_acm_host_line_coding_set(p->_acm_device, &line_coding) != ESP_OK) {
+    if (!esp32_usb_cdc_acm_connected(p) || cdc_acm_host_line_coding_set(p->_acm_device, &line_coding) != ESP_OK) {
         return ESP_LOADER_ERROR_FAIL;
     }
 
-    return ESP_LOADER_SUCCESS;
+    return esp32_usb_cdc_acm_connected(p) ? ESP_LOADER_SUCCESS : ESP_LOADER_ERROR_FAIL;
 }
 
 const esp_loader_port_ops_t esp32_usb_cdc_acm_ops = {

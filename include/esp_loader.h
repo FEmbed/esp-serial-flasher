@@ -86,6 +86,9 @@ typedef struct {
     bool flash_encryption_enabled;
     bool dcache_in_uart_download_disabled;
     bool icache_in_uart_download_disabled;
+    // Raw ROM fields: parity alone cannot prove a final Release-mode counter of 7.
+    uint8_t flash_crypt_cnt;
+    uint8_t key_purposes[7];
 } esp_loader_target_security_info_t;
 
 /**
@@ -325,6 +328,13 @@ esp_loader_error_t esp_loader_connect_secure_download_mode(esp_loader_t *loader,
         esp_loader_connect_args_t *connect_args,
         uint32_t flash_size);
 
+/** Synchronize an already selected secure ROM without reset or register fallback.
+ * The caller supplies verified capacity/physical target ownership: ROM security info
+ * cannot authenticate MAC or detect Flash capacity. No stub, baud change or retry of writes.
+ */
+esp_loader_error_t esp_loader_attach_secure_download_mode(esp_loader_t *loader,
+        esp_loader_connect_args_t *connect_args, uint32_t flash_size);
+
 /**
   * @brief Initiates flash operation
   *
@@ -359,6 +369,10 @@ esp_loader_error_t esp_loader_flash_start(esp_loader_t *loader, esp_loader_flash
   *     - ESP_LOADER_ERROR_INVALID_RESPONSE Internal error
   */
 esp_loader_error_t esp_loader_flash_write(esp_loader_t *loader, esp_loader_flash_cfg_t *cfg, void *payload, uint32_t size);
+
+/** Same as esp_loader_flash_write, but sends FLASH_DATA only once, including on lost ACK.
+ *  Checkpointed factory jobs must reconcile and obtain a new grant instead of retrying implicitly. */
+esp_loader_error_t esp_loader_flash_write_once(esp_loader_t *loader, esp_loader_flash_cfg_t *cfg, void *payload, uint32_t size);
 
 /**
   * @brief Ends flash operation.

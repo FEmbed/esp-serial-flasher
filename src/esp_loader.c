@@ -242,6 +242,36 @@ esp_loader_error_t esp_loader_connect_secure_download_mode(esp_loader_t *loader,
     return ESP_LOADER_SUCCESS;
 }
 
+esp_loader_error_t esp_loader_attach_secure_download_mode(esp_loader_t *loader,
+        esp_loader_connect_args_t *connect_args, uint32_t flash_size)
+{
+    if (!loader || !connect_args || !loader->_port || !loader->_port->ops || !loader->_protocol ||
+            !loader->_protocol->initialize_conn || !loader->_protocol->spi_attach ||
+            loader->_protocol_type != ESP_LOADER_PROTOCOL_SERIAL || !flash_size ||
+            flash_size > MAX_ROM_FLASH_SIZE || flash_size % FLASH_SECTOR_SIZE) {
+        return ESP_LOADER_ERROR_INVALID_PARAM;
+    }
+    // A failed attempt must not leave stale stub/size/register state usable by later writes.
+    loader->_target = ESP_UNKNOWN_CHIP;
+    loader->_target_flash_size = 0;
+    loader->_spi_attached = loader->_stub_running = false;
+    loader->_reg = NULL;
+    RETURN_ON_ERROR(loader->_protocol->initialize_conn(loader, connect_args));
+    esp_loader_target_security_info_t info = {0};
+    RETURN_ON_ERROR(esp_loader_get_security_info(loader, &info));
+    if (!info.secure_download_mode_enabled || info.target_chip >= ESP_MAX_CHIP ||
+            info.target_chip == ESP32_CHIP || info.target_chip == ESP8266_CHIP) {
+        return ESP_LOADER_ERROR_INVALID_RESPONSE;
+    }
+    loader->_port->ops->start_timer(loader->_port, DEFAULT_TIMEOUT);
+    RETURN_ON_ERROR(loader->_protocol->spi_attach(loader, 0));
+    loader->_target = info.target_chip;
+    loader->_reg = get_esp_target_data(info.target_chip);
+    loader->_target_flash_size = flash_size;
+    loader->_spi_attached = true;
+    return ESP_LOADER_SUCCESS;
+}
+
 static esp_loader_error_t spi_set_data_lengths(esp_loader_t *loader, size_t mosi_bits, size_t miso_bits)
 {
 
@@ -475,7 +505,7 @@ esp_loader_error_t esp_loader_flash_start(esp_loader_t *loader, esp_loader_flash
 }
 
 
-esp_loader_error_t esp_loader_flash_write(esp_loader_t *loader, esp_loader_flash_cfg_t *cfg, void *payload, uint32_t size)
+static esp_loader_error_t flash_write(esp_loader_t *loader, esp_loader_flash_cfg_t *cfg, void *payload, uint32_t size, bool retry)
 {
 
     if (loader->_protocol_type == ESP_LOADER_PROTOCOL_SPI) {
@@ -507,9 +537,20 @@ esp_loader_error_t esp_loader_flash_write(esp_loader_t *loader, esp_loader_flash
         loader->_port->ops->start_timer(loader->_port, DEFAULT_TIMEOUT);
         result = loader_flash_data_cmd(loader, &cfg->_state._sequence_number, (uint8_t *)payload, cfg->block_size);
         attempt++;
-    } while (result != ESP_LOADER_SUCCESS && attempt < SERIAL_FLASHER_WRITE_BLOCK_RETRIES);
+    } while (result != ESP_LOADER_SUCCESS && retry && attempt < SERIAL_FLASHER_WRITE_BLOCK_RETRIES);
 
     return result;
+}
+
+esp_loader_error_t esp_loader_flash_write(esp_loader_t *loader, esp_loader_flash_cfg_t *cfg, void *payload, uint32_t size)
+{
+    return flash_write(loader, cfg, payload, size, true);
+}
+
+esp_loader_error_t esp_loader_flash_write_once(esp_loader_t *loader, esp_loader_flash_cfg_t *cfg, void *payload, uint32_t size)
+{
+    // Expiring, checkpointed factory authorization must decide whether to retry.
+    return flash_write(loader, cfg, payload, size, false);
 }
 
 static void hexify(const uint8_t raw_md5[16], uint8_t hex_md5_out[32])
@@ -731,11 +772,11 @@ esp_loader_error_t esp_loader_get_security_info(esp_loader_t *loader,
         (resp.flags & GET_SECURITY_INFO_HARD_DIS_JTAG) != 0;
     security_info->usb_disabled = (resp.flags & GET_SECURITY_INFO_DIS_USB) != 0;
 
-    uint32_t key_purposes_bit_cnt = 0;
-    for (size_t byte = 0; byte < sizeof(resp.key_purposes); byte++) {
-        key_purposes_bit_cnt += byte_popcnt(resp.key_purposes[byte]);
-    }
-    security_info->flash_encryption_enabled = key_purposes_bit_cnt % 2;
+    // Key purpose describes allocation, not activation. Encryption is enabled
+    // when FLASH_CRYPT_CNT / SPI_BOOT_CRYPT_CNT has an odd number of set bits.
+    security_info->flash_encryption_enabled = byte_popcnt(resp.flash_crypt_cnt) % 2;
+    security_info->flash_crypt_cnt = resp.flash_crypt_cnt;
+    memcpy(security_info->key_purposes, resp.key_purposes, sizeof(security_info->key_purposes));
 
     security_info->dcache_in_uart_download_disabled =
         (resp.flags & GET_SECURITY_INFO_DIS_DOWNLOAD_DCACHE) != 0;

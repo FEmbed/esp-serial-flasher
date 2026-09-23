@@ -64,6 +64,9 @@ typedef struct {
 /** Port operations vtable for the ESP32 UART port. */
 extern const esp_loader_port_ops_t esp32_uart_ops;
 
+/** One checked normal-boot pulse; success means GPIO commands accepted, not target boot health. */
+esp_loader_error_t esp32_uart_boot_target(esp32_port_t *port);
+
 #ifdef __cplusplus
 }
 #endif
