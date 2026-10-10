@@ -1,5 +1,11 @@
 # ESP Serial Flasher
 
+## ESP-DAP P4 download-mode adaptation
+
+The local fork prepares ESP32-P4 ECO6/ECO7 (v3.1/v3.2) flash power before UART ROM or stub operations, following official esptool v5.3.1 `power_on_flash()`. It respects the existing eFuse voltage selection; it neither burns eFuse nor selects a new voltage. With ECO7 `DOWNLOAD_MODE_XPD_ON` set, it releases the PMU force-on state instead of repeating the full sequence. Secure download mode remains under ROM control.
+
+Register-trace comparison and I/O failure propagation tests are in `test/test_p4_flash_power.c` and `test/test_p4_flash_power.py`. These host tests do not constitute target programming acceptance. See Espressif's [v3.2 compatibility advisory](https://documentation.espressif.com/AR2026-004_Compatibility_Advisory_for_ESP32-P4_Chip_Revision_v3.2_EN.html).
+
 [![pre-commit.ci status](https://results.pre-commit.ci/badge/github/espressif/esp-serial-flasher/master.svg)](https://results.pre-commit.ci/latest/github/espressif/esp-serial-flasher/master)
 [![Component Registry](https://components.espressif.com/components/espressif/esp-serial-flasher/badge.svg)](https://components.espressif.com/components/espressif/esp-serial-flasher)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
