@@ -15,9 +15,15 @@
 #include "usb/vcp_ch34x.h"
 #include "usb/vcp_ftdi.h"
 #include "esp32_usb_cdc_acm_port.h"
+#include "protocol.h"
 
 static const char *TAG = "usb_cdc_acm_port";
-#define ESP32_USB_CDC_RX_STREAM_BUFFER_SIZE 4096
+/* stub max_inflight=1：整帧读完才 ACK，末尾 MD5 在最后 ACK 后发送。
+ * 即使 consumer 暂未调度，也须容纳首应答 + 4KiB 全转义数据 + baud dummy。
+ * SLIP 两帧各有 2 个 delimiter；static stream 额外占 1 字节判空。
+ * 当前 backing=8219 / usable=8218，USB DMA staging 仍由 CDC driver 管理。 */
+#define ESP32_USB_CDC_RX_STREAM_BUFFER_SIZE \
+    (2U * (FLASH_READ_STUB_PACKET_SIZE + sizeof(common_response_t) + sizeof(response_status_t)) + 7U)
 
 #if SERIAL_FLASHER_DEBUG_TRACE
 static void transfer_debug_print(const uint8_t *data, const uint16_t size, const bool write)
@@ -275,11 +281,13 @@ static esp_err_t open_auto_detected_usb_serial_device(const esp32_usb_cdc_acm_po
 static bool handle_usb_data(const uint8_t *data, size_t data_len, void *arg)
 {
     esp32_usb_cdc_acm_port_t *p = (esp32_usb_cdc_acm_port_t *)arg;
-    if (__atomic_load_n(&p->_disconnected, __ATOMIC_ACQUIRE)) return true;
+    if (__atomic_load_n(&p->_disconnected, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&p->_rx_fault, __ATOMIC_ACQUIRE)) return true;
     size_t sent = xStreamBufferSend(p->_rx_stream_buffer, data, data_len, 0);
     if (sent != data_len) {
+        // false 只让 CDC 追加同一 transfer，不会重送/背压；丢字节后整个 I/O 会话失效。
+        __atomic_store_n(&p->_rx_fault, 1, __ATOMIC_RELEASE);
         ESP_LOGW(TAG, "RX stream buffer full: dropped %u bytes", (unsigned)(data_len - sent));
-        return false;
     }
     return true;
 }
@@ -328,11 +336,14 @@ static esp_loader_error_t esp32_usb_port_init(esp_loader_port_t *port)
     if (p->_acm_device || p->_rx_stream_buffer || p->_rx_stream_storage || p->_rx_stream_buffer_struct)
         return ESP_LOADER_ERROR_INVALID_PARAM;
     __atomic_store_n(&p->_disconnected, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->_rx_fault, 0, __ATOMIC_RELEASE);
 
-    p->_rx_stream_storage = heap_caps_malloc(ESP32_USB_CDC_RX_STREAM_BUFFER_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    // Storage 不参与 DMA；产品显式选 PSRAM，分配失败不能侵占 internal 发布预算。
+    p->_rx_stream_storage = heap_caps_malloc(ESP32_USB_CDC_RX_STREAM_BUFFER_SIZE,
+                                            (p->rx_buffer_in_psram ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL) | MALLOC_CAP_8BIT);
     p->_rx_stream_buffer_struct = heap_caps_malloc(sizeof(StaticStreamBuffer_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (p->_rx_stream_storage == NULL || p->_rx_stream_buffer_struct == NULL) {
-        ESP_LOGE(TAG, "Could not allocate internal RX stream buffer for USB data reception");
+        ESP_LOGE(TAG, "Could not allocate RX stream buffer for USB data reception");
         usb_port_deinit_impl(p);
         return ESP_LOADER_ERROR_FAIL;
     }
@@ -341,7 +352,7 @@ static esp_loader_error_t esp32_usb_port_init(esp_loader_port_t *port)
                                                      p->_rx_stream_storage,
                                                      p->_rx_stream_buffer_struct);
     if (p->_rx_stream_buffer == NULL) {
-        ESP_LOGE(TAG, "Could not create the internal stream buffer for USB data reception");
+        ESP_LOGE(TAG, "Could not create the RX stream buffer for USB data reception");
         usb_port_deinit_impl(p);
         return ESP_LOADER_ERROR_FAIL;
     }
@@ -490,12 +501,12 @@ static esp_loader_error_t esp32_usb_write(esp_loader_port_t *port, const uint8_t
 {
     esp32_usb_cdc_acm_port_t *p = container_of(port, esp32_usb_cdc_acm_port_t, port);
     assert(data != NULL);
-    if (!esp32_usb_cdc_acm_connected(p)) return ESP_LOADER_ERROR_FAIL;
+    if (!esp32_usb_cdc_acm_io_ready(p)) return ESP_LOADER_ERROR_FAIL;
 
     esp_err_t err = cdc_acm_host_data_tx_blocking(p->_acm_device,
                     (uint8_t *)data, size, timeout);
 
-    if (!esp32_usb_cdc_acm_connected(p)) return ESP_LOADER_ERROR_FAIL;
+    if (!esp32_usb_cdc_acm_io_ready(p)) return ESP_LOADER_ERROR_FAIL;
     if (err == ESP_OK) {
 #if SERIAL_FLASHER_DEBUG_TRACE
         transfer_debug_print(data, size, true);
@@ -512,19 +523,25 @@ static esp_loader_error_t esp32_usb_read(esp_loader_port_t *port, uint8_t *data,
 {
     esp32_usb_cdc_acm_port_t *p = container_of(port, esp32_usb_cdc_acm_port_t, port);
     assert(data != NULL);
-    if (!esp32_usb_cdc_acm_connected(p)) return ESP_LOADER_ERROR_FAIL;
+    if (!esp32_usb_cdc_acm_io_ready(p)) return ESP_LOADER_ERROR_FAIL;
 
-    size_t received = xStreamBufferReceive(p->_rx_stream_buffer, data, size, pdMS_TO_TICKS(timeout));
-
-    if (!esp32_usb_cdc_acm_connected(p)) return ESP_LOADER_ERROR_FAIL;
-    if (received == size) {
-#if SERIAL_FLASHER_DEBUG_TRACE
-        transfer_debug_print(data, size, false);
-#endif
-        return ESP_LOADER_SUCCESS;
-    } else {
-        return ESP_LOADER_ERROR_TIMEOUT;
+    // Stream receive 可返回短读；所有片段共享同一 deadline，不能每片重启 timeout。
+    const int64_t deadline = esp_timer_get_time() + (int64_t)timeout * 1000;
+    size_t received = 0;
+    while (received < size) {
+        const int64_t remaining_us = deadline - esp_timer_get_time();
+        const TickType_t wait_ticks = remaining_us > 0 ?
+            (TickType_t)((remaining_us + (int64_t)portTICK_PERIOD_MS * 1000 - 1) /
+                         ((int64_t)portTICK_PERIOD_MS * 1000)) : 0;
+        received += xStreamBufferReceive(p->_rx_stream_buffer, data + received,
+                                         size - received, wait_ticks);
+        if (!esp32_usb_cdc_acm_io_ready(p)) return ESP_LOADER_ERROR_FAIL;
+        if (received < size && esp_timer_get_time() >= deadline) return ESP_LOADER_ERROR_TIMEOUT;
     }
+#if SERIAL_FLASHER_DEBUG_TRACE
+    transfer_debug_print(data, size, false);
+#endif
+    return ESP_LOADER_SUCCESS;
 }
 
 static esp_loader_error_t esp32_usb_change_rate(esp_loader_port_t *port, uint32_t baudrate)

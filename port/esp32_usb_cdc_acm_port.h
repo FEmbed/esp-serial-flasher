@@ -79,6 +79,7 @@ typedef struct {
     loader_port_esp32_usb_cdc_acm_callback_t acm_host_error_callback;
     loader_port_esp32_usb_cdc_acm_callback_t device_disconnected_callback;
     loader_port_esp32_usb_cdc_acm_callback_t acm_host_serial_state_callback;
+    bool rx_buffer_in_psram;         /*!< RX storage only; false supports hosts without PSRAM. No internal fallback. */
 
     /* Private runtime state — do not access directly */
     cdc_acm_dev_hdl_t    _acm_device;
@@ -91,6 +92,7 @@ typedef struct {
     uint16_t             _opened_pid;
     int64_t              _time_end;
     uint32_t            _disconnected;  /*!< Atomic latch, cleared only before opening a new session */
+    uint32_t            _rx_fault;      /*!< Atomic loss latch; reset/control remains available for recovery */
 } esp32_usb_cdc_acm_port_t;
 
 /* Latch is shared with the CDC callback; handles/storage belong only to the owner.
@@ -104,6 +106,13 @@ static inline bool esp32_usb_cdc_acm_connected(const esp32_usb_cdc_acm_port_t *p
 static inline void esp32_usb_cdc_acm_disconnected(esp32_usb_cdc_acm_port_t *p)
 {
     __atomic_store_n(&p->_disconnected, 1, __ATOMIC_RELEASE);
+}
+
+/* Data loss invalidates I/O until owner close/reinit, but must not prevent reset/control recovery. */
+static inline bool esp32_usb_cdc_acm_io_ready(const esp32_usb_cdc_acm_port_t *p)
+{
+    return esp32_usb_cdc_acm_connected(p) &&
+           !__atomic_load_n(&p->_rx_fault, __ATOMIC_ACQUIRE);
 }
 
 /** Port operations vtable for the ESP32 USB CDC-ACM port. */

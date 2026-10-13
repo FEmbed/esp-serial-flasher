@@ -33,7 +33,6 @@
 
 #define DEFAULT_FLASH_SIZE (2 * 1024 * 1024)
 #define MAX_ROM_FLASH_SIZE (16 * 1024 * 1024)
-#define FLASH_READ_STUB_PACKET_SIZE 4096U
 
 typedef enum {
     SPI_FLASH_READ_ID = 0x9F

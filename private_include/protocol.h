@@ -41,6 +41,9 @@ extern "C" {
 #define MAX_RESP_DATA_SIZE 64
 #define READ_FLASH_ROM_DATA_SIZE 64
 
+// Shared with the USB receive window: one unacknowledged stub packet at a time.
+#define FLASH_READ_STUB_PACKET_SIZE 4096U
+
 typedef enum __attribute__((packed))
 {
     FLASH_BEGIN = 0x02,

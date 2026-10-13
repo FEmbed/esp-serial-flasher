@@ -65,6 +65,32 @@ For ESP-IDF builds, you choose which port implementations to compile into the li
 - **Depends on**: `SOC_USB_OTG_SUPPORTED`
 - **Description**: Compile the ESP32 USB CDC-ACM port (`esp32_usb_cdc_acm_port.c`). Exposes `esp32_usb_cdc_acm_ops`. Requires the `espressif/usb_host_cdc_acm` managed component.
 
+The port's C configuration `rx_buffer_in_psram` selects RX stream storage in
+PSRAM when true, or internal RAM when false (the default for hosts without
+PSRAM). Allocation never falls back to a different memory capability. The
+stream control block and the CDC driver's 512-byte USB IN staging remain
+internal; receive storage lives from successful port initialization until the
+owner closes the device and deinitializes the port.
+
+The 4 KiB stub read packet can expand to 8194 bytes in SLIP. With one
+unacknowledged packet, the initial command response (at most 22 bytes) and two
+conservative baud-change delimiters require 8218 usable bytes. Static FreeRTOS
+streams reserve one byte, so storage is 8219 bytes. The stub sends the final MD5
+only after the last data ACK; it does not add another simultaneous data window.
+This replaces the previous 4096-byte storage: generic internal mode uses 4123
+additional internal bytes; PSRAM mode releases those previous 4096 internal
+storage bytes and allocates 8219 external bytes. Runtime state and allocator
+overhead must be measured separately on the host firmware.
+
+An RX overflow invalidates the I/O session. The callback consumes/discards the
+USB transfer and latches the fault; it neither blocks the CDC client task nor
+asks the driver to append/retry partially consumed bytes. Read/write adapters
+must use `esp32_usb_cdc_acm_io_ready()` before and after I/O. Reset and line
+control may still use `esp32_usb_cdc_acm_connected()` for recovery. Flushing or
+resetting the stream does not clear the fault; only owner close/reinitialization
+starts a new I/O session. Loader reads accumulate short receives using one
+deadline, with normal FreeRTOS tick rounding.
+
 ### Retry and Timing Configuration
 
 #### `SERIAL_FLASHER_WRITE_BLOCK_RETRIES`

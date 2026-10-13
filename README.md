@@ -6,6 +6,18 @@ The local fork prepares ESP32-P4 ECO6/ECO7 (v3.1/v3.2) flash power before UART R
 
 Register-trace comparison and I/O failure propagation tests are in `test/test_p4_flash_power.c` and `test/test_p4_flash_power.py`. These host tests do not constitute target programming acceptance. See Espressif's [v3.2 compatibility advisory](https://documentation.espressif.com/AR2026-004_Compatibility_Advisory_for_ESP32-P4_Chip_Revision_v3.2_EN.html).
 
+## USB receive window and memory policy
+
+The ESP32 USB CDC-ACM port retains 4 KiB stub read packets and one outstanding
+packet. RX storage is 8219 bytes (8218 usable), covering the worst SLIP-escaped
+packet, initial reply and baud delimiters even before the reader is scheduled.
+Set the port's C configuration `rx_buffer_in_psram = true` to keep this non-DMA
+storage in PSRAM; allocation failure closes initialization without an internal
+fallback. Zero/default selects internal memory for hosts without PSRAM. The
+stream control block and USB DMA staging remain internal. See the memory and
+fault lifecycle contract in [configuration](docs/configuration.md) and the
+deterministic [USB RX host regression](test/README.md#usb-rx-host-regression).
+
 [![pre-commit.ci status](https://results.pre-commit.ci/badge/github/espressif/esp-serial-flasher/master.svg)](https://results.pre-commit.ci/latest/github/espressif/esp-serial-flasher/master)
 [![Component Registry](https://components.espressif.com/components/espressif/esp-serial-flasher/badge.svg)](https://components.espressif.com/components/espressif/esp-serial-flasher)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)

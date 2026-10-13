@@ -2,10 +2,38 @@
 
 ## Overview
 
-The two kinds of tests are written for serial flasher:
+The following kinds of tests are written for serial flasher:
 
+- Deterministic host port tests
 - Qemu tests
 - Target tests
+
+## USB RX Host Regression
+
+```bash
+python test/run_usb_cdc_rx_regression.py --output-dir build-usb-rx-test
+```
+
+Requires Python 3 and `clang` (or `--compiler` selecting a C11 compiler). The
+runner compiles the actual `esp32_usb_cdc_acm_port.c` and `slip.c`, with SDK
+doubles limited to allocation, static stream capacity, USB callbacks, and a
+deterministic arrival clock. It records the compiler command and exit/output
+in `result.json`. It never opens a serial port or contacts a target.
+
+The regression covers the starved-consumer 8218-byte SLIP window and exact
+decoded bytes, 32 ACK-separated windows through ring wraparound, a deterministic
+reproduction of the old 4095-byte usable capacity failure even without SLIP
+escaping, sticky RX loss with reset/control recovery, new-session cleanup,
+PSRAM allocation failure without internal fallback, and short receives sharing
+one deadline (including disconnect/loss during I/O).
+
+The stream double follows FreeRTOS static `length - 1` capacity. It does not
+prove actual FreeRTOS concurrency, USB DMA/cache behavior, stub pacing, memory
+peaks, or hardware stability. The window proof relies on the bundled
+`esp-flasher-stub` v0.8.0 enforcing one unacknowledged packet and sending MD5
+after the final ACK; a stub or protocol-window change requires revisiting that
+bound. Hardware release acceptance must rerun complete flash readback, USB
+unplug/error recovery, serial bridging, and host RAM/PSRAM gates.
 
 ## Qemu Tests
 
